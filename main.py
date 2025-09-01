@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid as uuid_lib
 
-import fitz  # PyMuPDF
+import fitz  # gem
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Load multiple Gemini API keys
-GEMINI_KEYS = [
+ALL_GEMINI_KEYS = [
     os.getenv("GEMINI_API_KEY_1"),
     os.getenv("GEMINI_API_KEY_2"),
     os.getenv("GEMINI_API_KEY_3"),
@@ -40,29 +40,36 @@ GEMINI_KEYS = [
     os.getenv("GEMINI_API_KEY_6"),
     os.getenv("GEMINI_API_KEY_7"),
     os.getenv("GEMINI_API_KEY_8"),
+    os.getenv("GEMINI_API_KEY_9"),
 ]
 
 # Filter only valid keys
-GEMINI_KEYS = [key for key in GEMINI_KEYS if key and key.strip()]
+ALL_GEMINI_KEYS = [key for key in ALL_GEMINI_KEYS if key and key.strip()]
+
+# Split API keys by function
+EMBEDDING_BATCH_KEYS = ALL_GEMINI_KEYS[0:3]  # Keys 1-3 for generate_embeddings_batch
+QUERY_EMBEDDING_KEYS = ALL_GEMINI_KEYS[3:6]  # Keys 4-6 for ask_question embedding
+CHAT_RESPONSE_KEYS = ALL_GEMINI_KEYS[6:9]    # Keys 7-9 for chat response generation
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 MAX_CHUNKS_PER_REQUEST = int(os.getenv("MAX_CHUNKS_PER_REQUEST", "5"))
 
-if not GEMINI_KEYS:
-    raise ValueError("At least one GEMINI_API_KEY is required")
+if not ALL_GEMINI_KEYS or len(ALL_GEMINI_KEYS) < 9:
+    raise ValueError("9 GEMINI_API_KEYs are required (GEMINI_API_KEY_1 to GEMINI_API_KEY_9)")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Simple Round Robin Load Balancer
-class SimpleGeminiBalancer:
-    def __init__(self, api_keys: List[str]):
+# Specialized Round Robin Load Balancers for different functions
+class SpecializedGeminiBalancer:
+    def __init__(self, api_keys: List[str], name: str):
         if not api_keys:
-            raise ValueError("At least one API key is required")
+            raise ValueError(f"At least one API key is required for {name}")
         
         self.api_keys = api_keys
         self.current_index = 0
+        self.name = name
         
     def get_next_key(self) -> str:
         """Get next API key in round robin fashion"""
@@ -77,21 +84,27 @@ class SimpleGeminiBalancer:
                 genai.configure(api_key=key)
                 result = func(*args, **kwargs)
                 if attempt > 0:
-                    logger.info(f"Success with key {attempt + 1} after {attempt} failures")
+                    logger.info(f"{self.name}: Success with key {attempt + 1} after {attempt} failures")
                 return result
                 
             except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
-                logger.warning(f"API key {key[:10]}... quota exceeded, trying next...")
+                logger.warning(f"{self.name}: API key {key[:10]}... quota exceeded, trying next...")
                 continue
             except Exception as e:
-                logger.error(f"Error with key {key[:10]}...: {str(e)}")
+                logger.error(f"{self.name}: Error with key {key[:10]}...: {str(e)}")
                 continue
         
-        raise Exception("All API keys failed")
+        raise Exception(f"All API keys failed for {self.name}")
 
-# Initialize balancer
-gemini_balancer = SimpleGeminiBalancer(GEMINI_KEYS)
-logger.info(f"Initialized Gemini balancer with {len(GEMINI_KEYS)} keys")
+# Initialize specialized balancers
+embedding_batch_balancer = SpecializedGeminiBalancer(EMBEDDING_BATCH_KEYS, "EmbeddingBatch")
+query_embedding_balancer = SpecializedGeminiBalancer(QUERY_EMBEDDING_KEYS, "QueryEmbedding") 
+chat_response_balancer = SpecializedGeminiBalancer(CHAT_RESPONSE_KEYS, "ChatResponse")
+
+logger.info(f"Initialized Gemini balancers:")
+logger.info(f"  - Embedding Batch: {len(EMBEDDING_BATCH_KEYS)} keys (1-3)")
+logger.info(f"  - Query Embedding: {len(QUERY_EMBEDDING_KEYS)} keys (4-6)")
+logger.info(f"  - Chat Response: {len(CHAT_RESPONSE_KEYS)} keys (7-9)")
 
 # Database connection pool
 db_pool = None
@@ -264,7 +277,7 @@ def create_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
     return chunks
 
 async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings using Gemini with round robin load balancing"""
+    """Generate embeddings using Gemini with dedicated API keys (1-3)"""
     embeddings = []
     batch_size = 100  # Gemini API limit
     
@@ -272,9 +285,9 @@ async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
         batch = texts[i:i + batch_size]
         success = False
         
-        # Try all keys until one succeeds (automatic failover)
-        for attempt in range(len(GEMINI_KEYS)):
-            key = gemini_balancer.get_next_key()
+        # Try all embedding batch keys until one succeeds
+        for attempt in range(len(EMBEDDING_BATCH_KEYS)):
+            key = embedding_batch_balancer.get_next_key()
             
             try:
                 genai.configure(api_key=key)
@@ -295,18 +308,18 @@ async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
                     
                     success = True
                     if attempt > 0:
-                        logger.info(f"Success with key {attempt + 1} after {attempt} failures")
+                        logger.info(f"EmbeddingBatch: Success with key {attempt + 1} after {attempt} failures")
                     break
                     
             except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
-                logger.warning(f"API key {key[:10]}... quota exceeded, trying next...")
+                logger.warning(f"EmbeddingBatch: API key {key[:10]}... quota exceeded, trying next...")
                 continue
             except Exception as e:
-                logger.error(f"Error with key {key[:10]}...: {str(e)}")
+                logger.error(f"EmbeddingBatch: Error with key {key[:10]}...: {str(e)}")
                 continue
         
         if not success:
-            logger.error(f"All keys failed for batch {i//batch_size + 1}, using fallback")
+            logger.error(f"All embedding batch keys failed for batch {i//batch_size + 1}, using fallback")
             embeddings.extend([[0.0] * 768 for _ in batch])
             
         # Rate limiting
@@ -316,55 +329,76 @@ async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
 
 def build_prompt(user_prompt: str, merged_text: str, language: str) -> str:
     """Build language-specific prompt for Gemini"""
-    # Batasi panjang context untuk menghindari token limit
-    max_context_length = 8000
-    if len(merged_text) > max_context_length:
-        merged_text = merged_text[:max_context_length] + "... [text truncated]"
-    
     if language == "en":
-        return f"""Based on the following text from the PDF, please answer the question.
+        return f"""
+You're chatting with Rima, your personal reading assistant.
 
-CONTEXT FROM PDF:
+I've provided you with the most relevant text from the PDF. 
+Your job is to carefully read the following text, delimited by ####, 
+and then answer the user's question.
+
+####
 {merged_text}
+####
 
-QUESTION: {user_prompt}
+Prompt: {user_prompt}
 
-Please provide a clear, concise answer based only on the provided context. 
-If the answer cannot be found in the context, say "I cannot find this information in the document"."""
-    
-    else:  # Bahasa Indonesia default
-        return f"""Berdasarkan teks berikut dari PDF, jawablah pertanyaan.
+Answer in English. 
+Keep your tone friendly, simple, and concise. Avoid buzzwords or technical jargon. 
+Use clear, everyday language.
 
-KONTEKS DARI PDF:
+If the user's question is unrelated to the PDF or book, 
+respond with your general understanding.
+
+If you're unsure about the answer, just say "I don't know" or "I'm not sure".
+"""
+    elif language == "id":
+        return f"""
+Kamu sedang berbincang dengan Rima, asisten pribadi untuk membantumu membaca.
+
+Aku sudah memberikan potongan teks paling relevan dari PDF. 
+Tugasmu adalah membaca teks berikut dengan cermat (dibatasi oleh ####), 
+lalu menjawab pertanyaan pengguna.
+
+####
 {merged_text}
+####
 
-PERTANYAAN: {user_prompt}
+Pertanyaan: {user_prompt}
 
-Berikan jawaban yang jelas dan ringkas berdasarkan konteks yang disediakan. 
-Jika jawaban tidak dapat ditemukan dalam konteks, katakan "Saya tidak dapat menemukan informasi ini dalam dokumen"."""
+Jawab dalam Bahasa Indonesia.
+Gunakan gaya bahasa ramah, sederhana, dan ringkas. Hindari istilah teknis atau jargon. 
+Pakai bahasa sehari-hari yang mudah dipahami.
+
+Jika pertanyaan pengguna tidak ada hubungannya dengan PDF atau buku, 
+jawablah dengan pemahaman umummu.
+
+Jika kamu tidak yakin dengan jawabannya, cukup jawab "Saya tidak tahu" atau "Saya tidak yakin".
+"""
+    else:
+        return f"""
+You're chatting with Rima, your reading assistant.
+
+Relevant text from the PDF is below:
+
+####
+{merged_text}
+####
+
+Prompt: {user_prompt}
+
+Answer in {language}. Keep it clear and concise.
+If unsure, say "I don't know".
+"""
 
 def generate_chat_response_with_balancer(prompt: str) -> str:
-    """Generate chat response with load balancing and better error handling"""
+    """Generate chat response with dedicated API keys (7-9)"""
     def _generate(prompt_text):
-        try:
-            model = genai.GenerativeModel('gemini-1.5-pro')
-            response = model.generate_content(prompt_text)
-            
-            # Validasi response
-            if not response or not response.text or not response.text.strip():
-                raise ValueError("Empty response from Gemini")
-                
-            return response.text.strip()
-        except Exception as e:
-            logger.error(f"Error generating response: {str(e)}")
-            raise
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        response = model.generate_content(prompt_text)
+        return response.text
     
-    try:
-        return gemini_balancer.try_all_keys(_generate, prompt)
-    except Exception as e:
-        logger.error(f"All API keys failed for chat generation: {str(e)}")
-        # Fallback response
-        return "Saya mengalami kendala teknis. Silakan coba lagi dalam beberapa saat."
+    return chat_response_balancer.try_all_keys(_generate, prompt)
 
 # API Endpoints
 
@@ -496,8 +530,6 @@ async def ask_question(request: ChatRequest):
     """Ask question about a specific PDF"""
     start_time = datetime.now()
     
-    logger.info(f"Received question: {request.question} for UUID: {request.uuid}")
-    
     # Validate UUID
     try:
         uuid_lib.UUID(request.uuid)
@@ -520,21 +552,16 @@ async def ask_question(request: ChatRequest):
                 detail=f"PDF processing status: {status['processing_status']}"
             )
         
-        # Generate query embedding with load balancing
+        # Generate query embedding with dedicated API keys (4-6)
         try:
             def _generate_query_embedding(question):
-                result = genai.embed_content(
+                return genai.embed_content(
                     model="models/text-embedding-004",
                     content=question,
                     task_type="retrieval_query"
                 )
-                
-                if not result or "embedding" not in result:
-                    raise ValueError("Invalid embedding response")
-                    
-                return result
             
-            query_result = gemini_balancer.try_all_keys(_generate_query_embedding, request.question)
+            query_result = query_embedding_balancer.try_all_keys(_generate_query_embedding, request.question)
             query_embedding = query_result["embedding"]
             
         except Exception as e:
@@ -574,10 +601,7 @@ async def ask_question(request: ChatRequest):
         # Generate response with load balancing
         try:
             prompt = build_prompt(request.question, merged_text, request.language)
-            logger.info(f"Generated prompt length: {len(prompt)}")
-            
             response_text = generate_chat_response_with_balancer(prompt)
-            logger.info(f"Generated response: {response_text[:200]}...")  # Log sebagian response
             
             processing_time = (datetime.now() - start_time).total_seconds()
             
@@ -590,7 +614,6 @@ async def ask_question(request: ChatRequest):
             
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}")
-            logger.error(f"Prompt content: {prompt[:500]}...")  # Log sebagian prompt
             raise HTTPException(status_code=500, detail="Failed to generate answer")
 
 @app.get("/status/{uuid}", response_model=ProcessingStatus)
@@ -651,41 +674,6 @@ async def delete_pdf(uuid: str):
             "chunks_deleted": chunks_deleted,
         }
 
-@app.get("/test_keys")
-async def test_api_keys():
-    """Test all Gemini API keys"""
-    results = []
-    
-    for i, key in enumerate(GEMINI_KEYS):
-        try:
-            genai.configure(api_key=key)
-            # Test embedding generation
-            result = genai.embed_content(
-                model="models/text-embedding-004",
-                content="test",
-                task_type="retrieval_query"
-            )
-            
-            # Test chat generation
-            model = genai.GenerativeModel('gemini-1.5-pro')
-            response = model.generate_content("Hello")
-            
-            results.append({
-                "key_index": i + 1,
-                "status": "working",
-                "embedding_test": "success" if result else "failed",
-                "chat_test": "success" if response.text else "failed"
-            })
-            
-        except Exception as e:
-            results.append({
-                "key_index": i + 1,
-                "status": "failed",
-                "error": str(e)
-            })
-    
-    return {"results": results}
-
 @app.get("/")
 async def root():
     """Health check endpoint"""
@@ -702,8 +690,7 @@ async def health_check():
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
         db_status = "healthy"
-    except Exception as e:
-        logger.error(f"Database health check failed: {str(e)}")
+    except:
         db_status = "unhealthy"
     
     # Test Gemini API with one key
@@ -717,8 +704,7 @@ async def health_check():
         
         test_result = gemini_balancer.try_all_keys(_test_gemini)
         gemini_status = "healthy" if test_result else "unhealthy"
-    except Exception as e:
-        logger.error(f"Gemini API health check failed: {str(e)}")
+    except:
         gemini_status = "unhealthy"
     
     return {
