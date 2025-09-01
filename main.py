@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid as uuid_lib
 
-import fitz  # gem
+import fitz  # PyMuPDF
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -113,15 +113,18 @@ db_pool = None
 async def lifespan(app: FastAPI):
     global db_pool
     # Startup
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
-    
-    # Register vector type for all connections in the pool
     async def init_connection(conn):
         await register_vector(conn)
     
-    # Apply to existing connections
-    async with db_pool.acquire() as conn:
-        await register_vector(conn)
+    # Create pool with connection initializer
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL, 
+        min_size=5, 
+        max_size=20,
+        init=init_connection  # Register vector for every new connection
+    )
+    
+    logger.info("Database pool initialized with pgvector support")
     
     yield
     # Shutdown
@@ -472,9 +475,11 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
         chunk_texts = [chunk["content"] for chunk in chunks]
         embeddings = await generate_embeddings_batch(chunk_texts)
         
-        # Store in database
+        # Store in database with proper pgvector handling
         logger.info(f"Storing chunks and embeddings to database")
         async with db_pool.acquire() as conn:
+            # The connection already has register_vector from init_connection
+            
             # Clear existing chunks for this UUID
             await conn.execute(
                 "DELETE FROM pdf_chunks WHERE book_uuid = $1",
@@ -483,16 +488,28 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
             
             # Insert new chunks with pgvector support
             for i, chunk in enumerate(chunks):
+                # Convert embedding to proper format for pgvector
+                embedding_array = embeddings[i]
+                
+                # Ensure we have the right dimensions (768 for text-embedding-004)
+                if len(embedding_array) != 768:
+                    logger.warning(f"Embedding dimension mismatch: got {len(embedding_array)}, expected 768")
+                    # Pad or truncate to 768 dimensions
+                    if len(embedding_array) < 768:
+                        embedding_array = embedding_array + [0.0] * (768 - len(embedding_array))
+                    else:
+                        embedding_array = embedding_array[:768]
+                
                 await conn.execute(
                     """
                     INSERT INTO pdf_chunks (book_uuid, page_number, chunk_index, content, embedding)
-                    VALUES ($1, $2, $3, $4, $5)
+                    VALUES ($1, $2, $3, $4, $5::vector)
                     """,
                     book_uuid,
                     chunk["page_number"],
                     chunk["chunk_index"],
                     chunk["content"],
-                    embeddings[i]  # pgvector handles the conversion automatically
+                    embedding_array  # pgvector will handle the conversion with ::vector cast
                 )
             
             # Update processing status
@@ -564,18 +581,26 @@ async def ask_question(request: ChatRequest):
             query_result = query_embedding_balancer.try_all_keys(_generate_query_embedding, request.question)
             query_embedding = query_result["embedding"]
             
+            # Ensure query embedding has correct dimensions
+            if len(query_embedding) != 768:
+                logger.warning(f"Query embedding dimension mismatch: got {len(query_embedding)}, expected 768")
+                if len(query_embedding) < 768:
+                    query_embedding = query_embedding + [0.0] * (768 - len(query_embedding))
+                else:
+                    query_embedding = query_embedding[:768]
+            
         except Exception as e:
             logger.error(f"Error generating query embedding: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to process question")
         
-        # Vector similarity search - Use L2 distance
+        # Vector similarity search using L2 distance (matching the HNSW index)
         similar_chunks = await conn.fetch(
             """
             SELECT id, page_number, chunk_index, content,
-                   embedding <-> $2 as distance
+                   embedding <-> $2::vector as distance
             FROM pdf_chunks
             WHERE book_uuid = $1
-            ORDER BY embedding <-> $2
+            ORDER BY embedding <-> $2::vector
             LIMIT $3
             """,
             request.uuid, query_embedding, MAX_CHUNKS_PER_REQUEST
