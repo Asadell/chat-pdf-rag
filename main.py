@@ -2,17 +2,19 @@ import os
 import io
 import asyncio
 import logging
+import itertools
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid as uuid_lib
 
-import fitz
+import fitz  # gem
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
 import numpy as np
 import asyncpg
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -27,19 +29,68 @@ logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 load_dotenv()
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# Load multiple Gemini API keys
+GEMINI_KEYS = [
+    os.getenv("GEMINI_API_KEY_1"),
+    os.getenv("GEMINI_API_KEY_2"),
+    os.getenv("GEMINI_API_KEY_3"),
+    os.getenv("GEMINI_API_KEY_4"),
+    os.getenv("GEMINI_API_KEY_5"),
+    os.getenv("GEMINI_API_KEY_6"),
+    os.getenv("GEMINI_API_KEY_7"),
+    os.getenv("GEMINI_API_KEY_8"),
+]
+
+# Filter only valid keys
+GEMINI_KEYS = [key for key in GEMINI_KEYS if key and key.strip()]
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 MAX_CHUNKS_PER_REQUEST = int(os.getenv("MAX_CHUNKS_PER_REQUEST", "5"))
 
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY environment variable is required")
+if not GEMINI_KEYS:
+    raise ValueError("At least one GEMINI_API_KEY is required")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Configure Gemini
-genai.configure(api_key=GOOGLE_API_KEY)
+# Simple Round Robin Load Balancer
+class SimpleGeminiBalancer:
+    def __init__(self, api_keys: List[str]):
+        if not api_keys:
+            raise ValueError("At least one API key is required")
+        
+        self.api_keys = api_keys
+        self.current_index = 0
+        
+    def get_next_key(self) -> str:
+        """Get next API key in round robin fashion"""
+        key = self.api_keys[self.current_index]
+        self.current_index = (self.current_index + 1) % len(self.api_keys)
+        return key
+    
+    def try_all_keys(self, func, *args, **kwargs):
+        """Try function with all keys until one succeeds"""
+        for attempt, key in enumerate(self.api_keys):
+            try:
+                genai.configure(api_key=key)
+                result = func(*args, **kwargs)
+                if attempt > 0:
+                    logger.info(f"Success with key {attempt + 1} after {attempt} failures")
+                return result
+                
+            except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
+                logger.warning(f"API key {key[:10]}... quota exceeded, trying next...")
+                continue
+            except Exception as e:
+                logger.error(f"Error with key {key[:10]}...: {str(e)}")
+                continue
+        
+        raise Exception("All API keys failed")
+
+# Initialize balancer
+gemini_balancer = SimpleGeminiBalancer(GEMINI_KEYS)
+logger.info(f"Initialized Gemini balancer with {len(GEMINI_KEYS)} keys")
 
 # Database connection pool
 db_pool = None
@@ -203,30 +254,49 @@ def create_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
     return chunks
 
 async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings using Gemini in batches"""
+    """Generate embeddings using Gemini with round robin load balancing"""
     embeddings = []
     batch_size = 100  # Gemini API limit
     
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        try:
-            # Use Gemini embedding model
-            result = genai.embed_content(
-                model="models/text-embedding-004",
-                content=batch,
-                task_type="retrieval_document"
-            )
+        success = False
+        
+        # Try all keys until one succeeds (automatic failover)
+        for attempt in range(len(GEMINI_KEYS)):
+            key = gemini_balancer.get_next_key()
             
-            if isinstance(result["embedding"][0], list):
-                # Multiple embeddings returned
-                embeddings.extend(result["embedding"])
-            else:
-                # Single embedding returned
-                embeddings.append(result["embedding"])
+            try:
+                genai.configure(api_key=key)
                 
-        except Exception as e:
-            logger.error(f"Error generating embeddings for batch {i//batch_size + 1}: {str(e)}")
-            # Create zero embeddings as fallback
+                result = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content=batch,
+                    task_type="retrieval_document"
+                )
+                
+                if "embedding" in result and result["embedding"]:
+                    if isinstance(result["embedding"][0], list):
+                        # Multiple embeddings returned
+                        embeddings.extend(result["embedding"])
+                    else:
+                        # Single embedding returned
+                        embeddings.append(result["embedding"])
+                    
+                    success = True
+                    if attempt > 0:
+                        logger.info(f"Success with key {attempt + 1} after {attempt} failures")
+                    break
+                    
+            except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
+                logger.warning(f"API key {key[:10]}... quota exceeded, trying next...")
+                continue
+            except Exception as e:
+                logger.error(f"Error with key {key[:10]}...: {str(e)}")
+                continue
+        
+        if not success:
+            logger.error(f"All keys failed for batch {i//batch_size + 1}, using fallback")
             embeddings.extend([[0.0] * 768 for _ in batch])
             
         # Rate limiting
@@ -298,6 +368,15 @@ Answer in {language}. Keep it clear and concise.
 If unsure, say "I don't know".
 """
 
+def generate_chat_response_with_balancer(prompt: str) -> str:
+    """Generate chat response with load balancing"""
+    def _generate(prompt_text):
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        response = model.generate_content(prompt_text)
+        return response.text
+    
+    return gemini_balancer.try_all_keys(_generate, prompt)
+
 # API Endpoints
 
 @app.post("/upload_pdf")
@@ -365,7 +444,7 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
         if not chunks:
             raise Exception("No text could be extracted from PDF")
         
-        # Generate embeddings
+        # Generate embeddings with load balancing
         logger.info(f"Generating embeddings for {len(chunks)} chunks")
         chunk_texts = [chunk["content"] for chunk in chunks]
         embeddings = await generate_embeddings_batch(chunk_texts)
@@ -390,7 +469,7 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
                     chunk["page_number"],
                     chunk["chunk_index"],
                     chunk["content"],
-                    embeddings[i]
+                    embeddings[i]  # asyncpg handles list to vector conversion
                 )
             
             # Update processing status
@@ -450,19 +529,23 @@ async def ask_question(request: ChatRequest):
                 detail=f"PDF processing status: {status['processing_status']}"
             )
         
-        # Generate query embedding
+        # Generate query embedding with load balancing
         try:
-            query_result = genai.embed_content(
-                model="models/text-embedding-004",
-                content=request.question,
-                task_type="retrieval_query"
-            )
+            def _generate_query_embedding(question):
+                return genai.embed_content(
+                    model="models/text-embedding-004",
+                    content=question,
+                    task_type="retrieval_query"
+                )
+            
+            query_result = gemini_balancer.try_all_keys(_generate_query_embedding, request.question)
             query_embedding = query_result["embedding"]
+            
         except Exception as e:
             logger.error(f"Error generating query embedding: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to process question")
         
-        # Vector similarity search - Fixed to use L2 distance
+        # Vector similarity search - Use L2 distance
         similar_chunks = await conn.fetch(
             """
             SELECT id, page_number, chunk_index, content,
@@ -492,18 +575,16 @@ async def ask_question(request: ChatRequest):
                 "relevance_score": round(1 - chunk['distance'], 2)  # Convert distance to similarity
             })
         
-        # Generate response with Gemini
+        # Generate response with load balancing
         try:
             prompt = build_prompt(request.question, merged_text, request.language)
-            
-            model = genai.GenerativeModel('gemini-1.5-pro')
-            response = model.generate_content(prompt)
+            response_text = generate_chat_response_with_balancer(prompt)
             
             processing_time = (datetime.now() - start_time).total_seconds()
             
             return ChatResponse(
                 status="success",
-                answer=response.text,
+                answer=response_text,
                 sources=sources,
                 response_time=f"{processing_time:.1f}s"
             )
@@ -589,13 +670,16 @@ async def health_check():
     except:
         db_status = "unhealthy"
     
+    # Test Gemini API with one key
     try:
-        # Test Gemini API
-        test_result = genai.embed_content(
-            model="models/text-embedding-004",
-            content="test",
-            task_type="retrieval_query"
-        )
+        def _test_gemini():
+            return genai.embed_content(
+                model="models/text-embedding-004",
+                content="test",
+                task_type="retrieval_query"
+            )
+        
+        test_result = gemini_balancer.try_all_keys(_test_gemini)
         gemini_status = "healthy" if test_result else "unhealthy"
     except:
         gemini_status = "unhealthy"
@@ -603,6 +687,7 @@ async def health_check():
     return {
         "database": db_status,
         "gemini_api": gemini_status,
+        "available_keys": len(GEMINI_KEYS),
         "overall": "healthy" if db_status == "healthy" and gemini_status == "healthy" else "unhealthy"
     }
 
