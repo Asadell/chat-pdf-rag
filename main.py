@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid as uuid_lib
 
-import fitz  # gem
+import fitz  # PyMuPDF
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
@@ -316,76 +316,55 @@ async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
 
 def build_prompt(user_prompt: str, merged_text: str, language: str) -> str:
     """Build language-specific prompt for Gemini"""
+    # Batasi panjang context untuk menghindari token limit
+    max_context_length = 8000
+    if len(merged_text) > max_context_length:
+        merged_text = merged_text[:max_context_length] + "... [text truncated]"
+    
     if language == "en":
-        return f"""
-You're chatting with Rima, your personal reading assistant.
+        return f"""Based on the following text from the PDF, please answer the question.
 
-I've provided you with the most relevant text from the PDF. 
-Your job is to carefully read the following text, delimited by ####, 
-and then answer the user's question.
-
-####
+CONTEXT FROM PDF:
 {merged_text}
-####
 
-Prompt: {user_prompt}
+QUESTION: {user_prompt}
 
-Answer in English. 
-Keep your tone friendly, simple, and concise. Avoid buzzwords or technical jargon. 
-Use clear, everyday language.
+Please provide a clear, concise answer based only on the provided context. 
+If the answer cannot be found in the context, say "I cannot find this information in the document"."""
+    
+    else:  # Bahasa Indonesia default
+        return f"""Berdasarkan teks berikut dari PDF, jawablah pertanyaan.
 
-If the user's question is unrelated to the PDF or book, 
-respond with your general understanding.
-
-If you're unsure about the answer, just say "I don't know" or "I'm not sure".
-"""
-    elif language == "id":
-        return f"""
-Kamu sedang berbincang dengan Rima, asisten pribadi untuk membantumu membaca.
-
-Aku sudah memberikan potongan teks paling relevan dari PDF. 
-Tugasmu adalah membaca teks berikut dengan cermat (dibatasi oleh ####), 
-lalu menjawab pertanyaan pengguna.
-
-####
+KONTEKS DARI PDF:
 {merged_text}
-####
 
-Pertanyaan: {user_prompt}
+PERTANYAAN: {user_prompt}
 
-Jawab dalam Bahasa Indonesia.
-Gunakan gaya bahasa ramah, sederhana, dan ringkas. Hindari istilah teknis atau jargon. 
-Pakai bahasa sehari-hari yang mudah dipahami.
-
-Jika pertanyaan pengguna tidak ada hubungannya dengan PDF atau buku, 
-jawablah dengan pemahaman umummu.
-
-Jika kamu tidak yakin dengan jawabannya, cukup jawab "Saya tidak tahu" atau "Saya tidak yakin".
-"""
-    else:
-        return f"""
-You're chatting with Rima, your reading assistant.
-
-Relevant text from the PDF is below:
-
-####
-{merged_text}
-####
-
-Prompt: {user_prompt}
-
-Answer in {language}. Keep it clear and concise.
-If unsure, say "I don't know".
-"""
+Berikan jawaban yang jelas dan ringkas berdasarkan konteks yang disediakan. 
+Jika jawaban tidak dapat ditemukan dalam konteks, katakan "Saya tidak dapat menemukan informasi ini dalam dokumen"."""
 
 def generate_chat_response_with_balancer(prompt: str) -> str:
-    """Generate chat response with load balancing"""
+    """Generate chat response with load balancing and better error handling"""
     def _generate(prompt_text):
-        model = genai.GenerativeModel('gemini-1.5-pro')
-        response = model.generate_content(prompt_text)
-        return response.text
+        try:
+            model = genai.GenerativeModel('gemini-1.5-pro')
+            response = model.generate_content(prompt_text)
+            
+            # Validasi response
+            if not response or not response.text or not response.text.strip():
+                raise ValueError("Empty response from Gemini")
+                
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
+            raise
     
-    return gemini_balancer.try_all_keys(_generate, prompt)
+    try:
+        return gemini_balancer.try_all_keys(_generate, prompt)
+    except Exception as e:
+        logger.error(f"All API keys failed for chat generation: {str(e)}")
+        # Fallback response
+        return "Saya mengalami kendala teknis. Silakan coba lagi dalam beberapa saat."
 
 # API Endpoints
 
@@ -517,6 +496,8 @@ async def ask_question(request: ChatRequest):
     """Ask question about a specific PDF"""
     start_time = datetime.now()
     
+    logger.info(f"Received question: {request.question} for UUID: {request.uuid}")
+    
     # Validate UUID
     try:
         uuid_lib.UUID(request.uuid)
@@ -542,11 +523,16 @@ async def ask_question(request: ChatRequest):
         # Generate query embedding with load balancing
         try:
             def _generate_query_embedding(question):
-                return genai.embed_content(
+                result = genai.embed_content(
                     model="models/text-embedding-004",
                     content=question,
                     task_type="retrieval_query"
                 )
+                
+                if not result or "embedding" not in result:
+                    raise ValueError("Invalid embedding response")
+                    
+                return result
             
             query_result = gemini_balancer.try_all_keys(_generate_query_embedding, request.question)
             query_embedding = query_result["embedding"]
@@ -588,7 +574,10 @@ async def ask_question(request: ChatRequest):
         # Generate response with load balancing
         try:
             prompt = build_prompt(request.question, merged_text, request.language)
+            logger.info(f"Generated prompt length: {len(prompt)}")
+            
             response_text = generate_chat_response_with_balancer(prompt)
+            logger.info(f"Generated response: {response_text[:200]}...")  # Log sebagian response
             
             processing_time = (datetime.now() - start_time).total_seconds()
             
@@ -601,6 +590,7 @@ async def ask_question(request: ChatRequest):
             
         except Exception as e:
             logger.error(f"Error generating response: {str(e)}")
+            logger.error(f"Prompt content: {prompt[:500]}...")  # Log sebagian prompt
             raise HTTPException(status_code=500, detail="Failed to generate answer")
 
 @app.get("/status/{uuid}", response_model=ProcessingStatus)
@@ -661,6 +651,41 @@ async def delete_pdf(uuid: str):
             "chunks_deleted": chunks_deleted,
         }
 
+@app.get("/test_keys")
+async def test_api_keys():
+    """Test all Gemini API keys"""
+    results = []
+    
+    for i, key in enumerate(GEMINI_KEYS):
+        try:
+            genai.configure(api_key=key)
+            # Test embedding generation
+            result = genai.embed_content(
+                model="models/text-embedding-004",
+                content="test",
+                task_type="retrieval_query"
+            )
+            
+            # Test chat generation
+            model = genai.GenerativeModel('gemini-1.5-pro')
+            response = model.generate_content("Hello")
+            
+            results.append({
+                "key_index": i + 1,
+                "status": "working",
+                "embedding_test": "success" if result else "failed",
+                "chat_test": "success" if response.text else "failed"
+            })
+            
+        except Exception as e:
+            results.append({
+                "key_index": i + 1,
+                "status": "failed",
+                "error": str(e)
+            })
+    
+    return {"results": results}
+
 @app.get("/")
 async def root():
     """Health check endpoint"""
@@ -677,7 +702,8 @@ async def health_check():
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
         db_status = "healthy"
-    except:
+    except Exception as e:
+        logger.error(f"Database health check failed: {str(e)}")
         db_status = "unhealthy"
     
     # Test Gemini API with one key
@@ -691,7 +717,8 @@ async def health_check():
         
         test_result = gemini_balancer.try_all_keys(_test_gemini)
         gemini_status = "healthy" if test_result else "unhealthy"
-    except:
+    except Exception as e:
+        logger.error(f"Gemini API health check failed: {str(e)}")
         gemini_status = "unhealthy"
     
     return {
