@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid as uuid_lib
 
-import fitz  # PyMuPDF
+import fitz
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
