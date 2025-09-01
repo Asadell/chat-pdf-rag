@@ -13,6 +13,7 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 import numpy as np
 import asyncpg
+from pgvector.asyncpg import register_vector
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
@@ -100,6 +101,15 @@ async def lifespan(app: FastAPI):
     global db_pool
     # Startup
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
+    
+    # Register vector type for all connections in the pool
+    async def init_connection(conn):
+        await register_vector(conn)
+    
+    # Apply to existing connections
+    async with db_pool.acquire() as conn:
+        await register_vector(conn)
+    
     yield
     # Shutdown
     await db_pool.close()
@@ -458,7 +468,7 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
                 book_uuid
             )
             
-            # Insert new chunks
+            # Insert new chunks with pgvector support
             for i, chunk in enumerate(chunks):
                 await conn.execute(
                     """
@@ -469,7 +479,7 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
                     chunk["page_number"],
                     chunk["chunk_index"],
                     chunk["content"],
-                    embeddings[i]  # asyncpg handles list to vector conversion
+                    embeddings[i]  # pgvector handles the conversion automatically
                 )
             
             # Update processing status
