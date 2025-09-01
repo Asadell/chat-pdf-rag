@@ -693,7 +693,7 @@ async def health_check():
     except:
         db_status = "unhealthy"
     
-    # Test Gemini API with one key
+    # Test Gemini API with one key from embedding batch balancer
     try:
         def _test_gemini():
             return genai.embed_content(
@@ -702,7 +702,7 @@ async def health_check():
                 task_type="retrieval_query"
             )
         
-        test_result = gemini_balancer.try_all_keys(_test_gemini)
+        test_result = embedding_batch_balancer.try_all_keys(_test_gemini)
         gemini_status = "healthy" if test_result else "unhealthy"
     except:
         gemini_status = "unhealthy"
@@ -710,9 +710,12 @@ async def health_check():
     return {
         "database": db_status,
         "gemini_api": gemini_status,
-        "available_keys": len(GEMINI_KEYS),
+        "available_keys": len(ALL_GEMINI_KEYS),
+        "embedding_batch_keys": len(EMBEDDING_BATCH_KEYS),
+        "query_embedding_keys": len(QUERY_EMBEDDING_KEYS),
+        "chat_response_keys": len(CHAT_RESPONSE_KEYS),
         "overall": "healthy" if db_status == "healthy" and gemini_status == "healthy" else "unhealthy"
-    }
+    }   
 
 if __name__ == "__main__":
     import uvicorn
