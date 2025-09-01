@@ -319,10 +319,10 @@ async def upload_pdf(
     # Check if already processed
     async with db_pool.acquire() as conn:
         existing = await conn.fetchrow(
-            "SELECT status FROM pdf_processing_status WHERE book_uuid = $1",
+            "SELECT processing_status FROM pdf_processing_status WHERE book_uuid = $1",
             uuid
         )
-        if existing and existing['status'] == 'completed':
+        if existing and existing['processing_status'] == 'completed':
             raise HTTPException(status_code=409, detail="PDF already processed for this UUID")
     
     # Read PDF bytes
@@ -462,7 +462,7 @@ async def ask_question(request: ChatRequest):
             logger.error(f"Error generating query embedding: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to process question")
         
-        # Vector similarity search
+        # Vector similarity search - Fixed to use L2 distance
         similar_chunks = await conn.fetch(
             """
             SELECT id, page_number, chunk_index, content,
@@ -523,7 +523,7 @@ async def get_processing_status(uuid: str):
     async with db_pool.acquire() as conn:
         status = await conn.fetchrow(
             """
-            SELECT book_uuid, processing_status, total_pages, total_chunks, 
+            SELECT book_uuid, processing_status as status, total_pages, total_chunks, 
                    processed_at, error_message
             FROM pdf_processing_status 
             WHERE book_uuid = $1
@@ -536,7 +536,7 @@ async def get_processing_status(uuid: str):
         
         return ProcessingStatus(
             book_uuid=status['book_uuid'],
-            status=status['processing_status'],
+            status=status['status'],
             total_pages=status['total_pages'],
             total_chunks=status['total_chunks'],
             processed_at=status['processed_at'],
