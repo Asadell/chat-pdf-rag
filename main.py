@@ -61,50 +61,142 @@ if not ALL_GEMINI_KEYS or len(ALL_GEMINI_KEYS) < 9:
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Specialized Round Robin Load Balancers for different functions
-class SpecializedGeminiBalancer:
-    def __init__(self, api_keys: List[str], name: str):
+# Specialized Model Manager dengan Pre-initialized Models per Function
+class SpecializedModelManager:
+    def __init__(self, api_keys: List[str], function_name: str, need_chat_model: bool = False):
         if not api_keys:
-            raise ValueError(f"At least one API key is required for {name}")
+            raise ValueError(f"At least one API key is required for {function_name}")
         
         self.api_keys = api_keys
         self.current_index = 0
-        self.name = name
+        self.function_name = function_name
+        self.models = {}  # Store pre-initialized models
         
-    def get_next_key(self) -> str:
-        """Get next API key in round robin fashion"""
-        key = self.api_keys[self.current_index]
-        self.current_index = (self.current_index + 1) % len(self.api_keys)
-        return key
-    
-    def try_all_keys(self, func, *args, **kwargs):
-        """Try function with all keys until one succeeds"""
-        for attempt, key in enumerate(self.api_keys):
+        # Pre-initialize models untuk setiap API key
+        logger.info(f"Pre-initializing {function_name} models...")
+        successful_keys = []
+        
+        for i, key in enumerate(api_keys):
             try:
                 genai.configure(api_key=key)
-                result = func(*args, **kwargs)
+                
+                # Test API key dengan simple embedding call
+                test_result = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content="test",
+                    task_type="retrieval_query"
+                )
+                
+                model_info = {
+                    'api_key': key,
+                    'key_index': i + 1
+                }
+                
+                # Buat chat model jika diperlukan
+                if need_chat_model:
+                    model_info['chat_model'] = genai.GenerativeModel('gemini-2.0-flash-lite')
+                
+                self.models[key] = model_info
+                successful_keys.append(key)
+                logger.info(f"✓ {function_name} Model {i + 1} initialized with key {key[:10]}...")
+                
+            except Exception as e:
+                logger.error(f"✗ {function_name} Model {i + 1} failed: {str(e)}")
+                continue
+        
+        # Update api_keys to only successful ones
+        self.api_keys = successful_keys
+        
+        if not self.models:
+            raise ValueError(f"No models could be initialized for {function_name}")
+        
+        logger.info(f"{function_name}: Successfully initialized {len(self.models)} models")
+    
+    def get_next_model_info(self) -> dict:
+        """Get next model info in round robin fashion"""
+        key = self.api_keys[self.current_index]
+        model_info = self.models[key]
+        self.current_index = (self.current_index + 1) % len(self.api_keys)
+        return model_info
+    
+    def generate_embedding(self, content, task_type="retrieval_document"):
+        """Generate embedding dengan round robin dalam function ini saja"""
+        for attempt in range(len(self.api_keys)):
+            model_info = self.get_next_model_info()
+            
+            try:
+                # Configure API key untuk embedding
+                genai.configure(api_key=model_info['api_key'])
+                result = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content=content,
+                    task_type=task_type
+                )
+                
                 if attempt > 0:
-                    logger.info(f"{self.name}: Success with key {attempt + 1} after {attempt} failures")
+                    logger.info(f"{self.function_name}: Success with key {model_info['key_index']} after {attempt} failures")
                 return result
                 
             except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
-                logger.warning(f"{self.name}: API key {key[:10]}... quota exceeded, trying next...")
+                logger.warning(f"{self.function_name}: Key {model_info['key_index']} quota exceeded, trying next...")
                 continue
             except Exception as e:
-                logger.error(f"{self.name}: Error with key {key[:10]}...: {str(e)}")
+                logger.error(f"{self.function_name}: Error with key {model_info['key_index']}: {str(e)}")
                 continue
         
-        raise Exception(f"All API keys failed for {self.name}")
+        raise Exception(f"All {len(self.api_keys)} API keys failed for {self.function_name}")
+    
+    def generate_chat_response(self, prompt: str) -> str:
+        """Generate chat response dengan pre-initialized models"""
+        if 'chat_model' not in list(self.models.values())[0]:
+            raise ValueError("Chat models not initialized for this manager")
+        
+        for attempt in range(len(self.api_keys)):
+            model_info = self.get_next_model_info()
+            
+            try:
+                # Configure API key dan gunakan PRE-INITIALIZED model
+                genai.configure(api_key=model_info['api_key'])
+                response = model_info['chat_model'].generate_content(prompt)
+                
+                if attempt > 0:
+                    logger.info(f"{self.function_name}: Success with key {model_info['key_index']} after {attempt} failures")
+                return response.text
+                
+            except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
+                logger.warning(f"{self.function_name}: Key {model_info['key_index']} quota exceeded, trying next...")
+                continue
+            except Exception as e:
+                logger.error(f"{self.function_name}: Error with key {model_info['key_index']}: {str(e)}")
+                continue
+        
+        # Fallback response
+        logger.error(f"{self.function_name}: All API keys failed, returning fallback")
+        return "Maaf, saya sedang mengalami kendala teknis. Silakan coba lagi dalam beberapa menit."
 
-# Initialize specialized balancers
-embedding_batch_balancer = SpecializedGeminiBalancer(EMBEDDING_BATCH_KEYS, "EmbeddingBatch")
-query_embedding_balancer = SpecializedGeminiBalancer(QUERY_EMBEDDING_KEYS, "QueryEmbedding") 
-chat_response_balancer = SpecializedGeminiBalancer(CHAT_RESPONSE_KEYS, "ChatResponse")
+# Initialize specialized managers dengan pembagian keys sesuai fungsi
+embedding_batch_manager = SpecializedModelManager(
+    EMBEDDING_BATCH_KEYS, 
+    "EmbeddingBatch", 
+    need_chat_model=False
+)
 
-logger.info(f"Initialized Gemini balancers:")
-logger.info(f"  - Embedding Batch: {len(EMBEDDING_BATCH_KEYS)} keys (1-3)")
-logger.info(f"  - Query Embedding: {len(QUERY_EMBEDDING_KEYS)} keys (4-6)")
-logger.info(f"  - Chat Response: {len(CHAT_RESPONSE_KEYS)} keys (7-9)")
+query_embedding_manager = SpecializedModelManager(
+    QUERY_EMBEDDING_KEYS, 
+    "QueryEmbedding", 
+    need_chat_model=False
+)
+
+chat_response_manager = SpecializedModelManager(
+    CHAT_RESPONSE_KEYS, 
+    "ChatResponse", 
+    need_chat_model=True  # Only this one needs chat models
+)
+
+logger.info(f"Initialized specialized managers:")
+logger.info(f"  - Embedding Batch: {len(embedding_batch_manager.models)} models (keys 1-3)")
+logger.info(f"  - Query Embedding: {len(query_embedding_manager.models)} models (keys 4-6)")
+logger.info(f"  - Chat Response: {len(chat_response_manager.models)} models (keys 7-9)")
 
 # Database connection pool
 db_pool = None
@@ -121,7 +213,7 @@ async def lifespan(app: FastAPI):
         DATABASE_URL, 
         min_size=5, 
         max_size=20,
-        init=init_connection  # Register vector for every new connection
+        init=init_connection
     )
     
     logger.info("Database pool initialized with pgvector support")
@@ -140,7 +232,7 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Sesuaikan dengan domain aplikasi Anda
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -150,7 +242,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     uuid: str
     question: str
-    language: str = "id"  # Default bahasa Indonesia
+    language: str = "id"
 
 class ChatResponse(BaseModel):
     status: str
@@ -173,27 +265,24 @@ def count_tokens(text: str) -> int:
         encoding = tiktoken.get_encoding("cl100k_base")
         return len(encoding.encode(text))
     except:
-        return len(text.split())  # Fallback to word count
+        return len(text.split())
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> Dict[int, str]:
     """Extract text from PDF with OCR fallback for image pages"""
     page_texts = {}
     
-    # Try text extraction first
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     
     for page_num in range(len(doc)):
         page = doc[page_num]
         text = page.get_text("text").strip()
         
-        if text and len(text) > 50:  # Threshold untuk text yang meaningful
+        if text and len(text) > 50:
             page_texts[page_num + 1] = text
             logger.info(f"Page {page_num + 1}: Extracted {len(text)} characters via text parsing")
         else:
-            # Fallback to OCR
             logger.info(f"Page {page_num + 1}: No text found, using OCR...")
             try:
-                # Convert specific page to image
                 images = convert_from_bytes(
                     pdf_bytes, 
                     first_page=page_num + 1, 
@@ -202,11 +291,10 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> Dict[int, str]:
                 )
                 
                 if images:
-                    # OCR with Indonesian + English support
                     ocr_text = pytesseract.image_to_string(
                         images[0], 
                         lang="ind+eng",
-                        config='--psm 6'  # Assume uniform block of text
+                        config='--psm 6'
                     ).strip()
                     
                     if ocr_text:
@@ -230,11 +318,9 @@ def create_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
         if not text or text.startswith("[Error:"):
             continue
             
-        # Simple chunking by token count
         tokens = count_tokens(text)
         
         if tokens <= CHUNK_SIZE:
-            # Entire page fits in one chunk
             chunks.append({
                 "page_number": page_num,
                 "chunk_index": 1,
@@ -242,7 +328,6 @@ def create_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
                 "token_count": tokens
             })
         else:
-            # Split page into multiple chunks
             words = text.split()
             chunk_words = []
             chunk_index = 1
@@ -252,7 +337,6 @@ def create_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
                 current_text = " ".join(chunk_words)
                 
                 if count_tokens(current_text) >= CHUNK_SIZE:
-                    # Save current chunk
                     chunks.append({
                         "page_number": page_num,
                         "chunk_index": chunk_index,
@@ -260,15 +344,13 @@ def create_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
                         "token_count": count_tokens(current_text)
                     })
                     
-                    # Start new chunk with overlap
                     overlap_words = chunk_words[-CHUNK_OVERLAP:] if len(chunk_words) > CHUNK_OVERLAP else chunk_words
                     chunk_words = overlap_words
                     chunk_index += 1
             
-            # Save remaining words as final chunk
             if chunk_words:
                 final_text = " ".join(chunk_words)
-                if count_tokens(final_text) > 20:  # Minimum chunk size
+                if count_tokens(final_text) > 20:
                     chunks.append({
                         "page_number": page_num,
                         "chunk_index": chunk_index,
@@ -278,57 +360,6 @@ def create_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
     
     logger.info(f"Created {len(chunks)} chunks from {len(page_texts)} pages")
     return chunks
-
-async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings using Gemini with dedicated API keys (1-3)"""
-    embeddings = []
-    batch_size = 100  # Gemini API limit
-    
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        success = False
-        
-        # Try all embedding batch keys until one succeeds
-        for attempt in range(len(EMBEDDING_BATCH_KEYS)):
-            key = embedding_batch_balancer.get_next_key()
-            
-            try:
-                genai.configure(api_key=key)
-                
-                result = genai.embed_content(
-                    model="models/text-embedding-004",
-                    content=batch,
-                    task_type="retrieval_document"
-                )
-                
-                if "embedding" in result and result["embedding"]:
-                    if isinstance(result["embedding"][0], list):
-                        # Multiple embeddings returned
-                        embeddings.extend(result["embedding"])
-                    else:
-                        # Single embedding returned
-                        embeddings.append(result["embedding"])
-                    
-                    success = True
-                    if attempt > 0:
-                        logger.info(f"EmbeddingBatch: Success with key {attempt + 1} after {attempt} failures")
-                    break
-                    
-            except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
-                logger.warning(f"EmbeddingBatch: API key {key[:10]}... quota exceeded, trying next...")
-                continue
-            except Exception as e:
-                logger.error(f"EmbeddingBatch: Error with key {key[:10]}...: {str(e)}")
-                continue
-        
-        if not success:
-            logger.error(f"All embedding batch keys failed for batch {i//batch_size + 1}, using fallback")
-            embeddings.extend([[0.0] * 768 for _ in batch])
-            
-        # Rate limiting
-        await asyncio.sleep(1)
-    
-    return embeddings
 
 def build_prompt(user_prompt: str, merged_text: str, language: str) -> str:
     """Build language-specific prompt for Gemini"""
@@ -394,14 +425,171 @@ Answer in {language}. Keep it clear and concise.
 If unsure, say "I don't know".
 """
 
-def generate_chat_response_with_balancer(prompt: str) -> str:
-    """Generate chat response with dedicated API keys (7-9)"""
-    def _generate(prompt_text):
-        model = genai.GenerativeModel('gemini-1.5-pro')
-        response = model.generate_content(prompt_text)
-        return response.text
+# Specialized Model Manager dengan Pre-initialized Models
+class SpecializedModelManager:
+    def __init__(self, api_keys: List[str], function_name: str, need_chat_model: bool = False):
+        if not api_keys:
+            raise ValueError(f"At least one API key is required for {function_name}")
+        
+        self.api_keys = api_keys
+        self.current_index = 0
+        self.function_name = function_name
+        self.models = {}  # Store pre-initialized models
+        
+        # Pre-initialize models untuk setiap API key di function ini
+        logger.info(f"Pre-initializing {function_name} models...")
+        successful_keys = []
+        
+        for i, key in enumerate(api_keys):
+            try:
+                genai.configure(api_key=key)
+                
+                # Test API key dengan simple embedding call
+                test_result = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content="test",
+                    task_type="retrieval_query"
+                )
+                
+                model_info = {
+                    'api_key': key,
+                    'key_index': i + 1
+                }
+                
+                # Buat chat model jika diperlukan (khusus untuk chat response)
+                if need_chat_model:
+                    model_info['chat_model'] = genai.GenerativeModel('gemini-2.0-flash-lite')
+                
+                self.models[key] = model_info
+                successful_keys.append(key)
+                logger.info(f"✓ {function_name} Model {i + 1} initialized with key {key[:10]}...")
+                
+            except Exception as e:
+                logger.error(f"✗ {function_name} Model {i + 1} failed: {str(e)}")
+                continue
+        
+        # Update api_keys to only successful ones
+        self.api_keys = successful_keys
+        
+        if not self.models:
+            raise ValueError(f"No models could be initialized for {function_name}")
+        
+        logger.info(f"{function_name}: Successfully initialized {len(self.models)} models")
     
-    return chat_response_balancer.try_all_keys(_generate, prompt)
+    def get_next_model_info(self) -> dict:
+        """Get next model info in round robin fashion"""
+        key = self.api_keys[self.current_index]
+        model_info = self.models[key]
+        self.current_index = (self.current_index + 1) % len(self.api_keys)
+        return model_info
+    
+    def generate_embedding(self, content, task_type="retrieval_document"):
+        """Generate embedding dengan round robin dalam manager ini"""
+        for attempt in range(len(self.api_keys)):
+            model_info = self.get_next_model_info()
+            
+            try:
+                genai.configure(api_key=model_info['api_key'])
+                result = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content=content,
+                    task_type=task_type
+                )
+                
+                if attempt > 0:
+                    logger.info(f"{self.function_name}: Success with key {model_info['key_index']} after {attempt} failures")
+                return result
+                
+            except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
+                logger.warning(f"{self.function_name}: Key {model_info['key_index']} quota exceeded, trying next...")
+                continue
+            except Exception as e:
+                logger.error(f"{self.function_name}: Error with key {model_info['key_index']}: {str(e)}")
+                continue
+        
+        raise Exception(f"All {len(self.api_keys)} API keys failed for {self.function_name}")
+    
+    def generate_chat_response(self, prompt: str) -> str:
+        """Generate chat response dengan pre-initialized models - TIDAK ADA MODEL CREATION!"""
+        for attempt in range(len(self.api_keys)):
+            model_info = self.get_next_model_info()
+            
+            try:
+                # Configure API key dan langsung pakai pre-initialized model
+                genai.configure(api_key=model_info['api_key'])
+                # LANGSUNG PAKAI MODEL YANG SUDAH DIBUAT DI __init__
+                response = model_info['chat_model'].generate_content(prompt)
+                
+                if attempt > 0:
+                    logger.info(f"{self.function_name}: Success with key {model_info['key_index']} after {attempt} failures")
+                return response.text
+                
+            except (google_exceptions.ResourceExhausted, google_exceptions.PermissionDenied) as e:
+                logger.warning(f"{self.function_name}: Key {model_info['key_index']} quota exceeded, trying next...")
+                continue
+            except Exception as e:
+                logger.error(f"{self.function_name}: Error with key {model_info['key_index']}: {str(e)}")
+                continue
+        
+        # Fallback response
+        logger.error(f"{self.function_name}: All API keys failed, returning fallback")
+        return "Maaf, saya sedang mengalami kendala teknis. Silakan coba lagi dalam beberapa menit."
+
+# Initialize specialized managers dengan pembagian sesuai requirement Anda
+embedding_batch_manager = SpecializedModelManager(
+    EMBEDDING_BATCH_KEYS,      # Keys 1-3 
+    "EmbeddingBatch", 
+    need_chat_model=False      # Hanya butuh embedding
+)
+
+query_embedding_manager = SpecializedModelManager(
+    QUERY_EMBEDDING_KEYS,      # Keys 4-6
+    "QueryEmbedding", 
+    need_chat_model=False      # Hanya butuh embedding
+)
+
+chat_response_manager = SpecializedModelManager(
+    CHAT_RESPONSE_KEYS,        # Keys 7-9
+    "ChatResponse", 
+    need_chat_model=True       # Butuh chat model (pre-initialized!)
+)
+
+logger.info(f"Initialized specialized managers:")
+logger.info(f"  - Embedding Batch: {len(embedding_batch_manager.models)} models (keys 1-3)")
+logger.info(f"  - Query Embedding: {len(query_embedding_manager.models)} models (keys 4-6)")
+logger.info(f"  - Chat Response: {len(chat_response_manager.models)} models (keys 7-9)")
+
+# Updated functions using specialized managers
+async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """Generate embeddings using KEYS 1-3 dengan pre-initialized setup"""
+    embeddings = []
+    batch_size = 100
+    
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        
+        try:
+            # Pakai embedding_batch_manager (keys 1-3)
+            result = embedding_batch_manager.generate_embedding(batch, "retrieval_document")
+            
+            if "embedding" in result and result["embedding"]:
+                if isinstance(result["embedding"][0], list):
+                    embeddings.extend(result["embedding"])
+                else:
+                    embeddings.append(result["embedding"])
+                    
+        except Exception as e:
+            logger.error(f"Batch embedding failed: {str(e)}")
+            embeddings.extend([[0.0] * 768 for _ in batch])
+        
+        await asyncio.sleep(1)
+    
+    return embeddings
+
+def generate_chat_response_with_balancer(prompt: str) -> str:
+    """Generate chat response using KEYS 7-9 dengan PRE-INITIALIZED MODELS"""
+    # Langsung pakai chat_response_manager dengan pre-initialized models
+    return chat_response_manager.generate_chat_response(prompt)
 
 # API Endpoints
 
@@ -415,7 +603,6 @@ async def upload_pdf(
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="File must be a PDF")
     
-    # Validate UUID format
     try:
         uuid_lib.UUID(uuid)
     except ValueError:
@@ -430,10 +617,7 @@ async def upload_pdf(
         if existing and existing['processing_status'] == 'completed':
             raise HTTPException(status_code=409, detail="PDF already processed for this UUID")
     
-    # Read PDF bytes
     pdf_bytes = await file.read()
-    
-    # Add to background processing
     background_tasks.add_task(process_pdf_background, uuid, file.filename, pdf_bytes)
     
     return {
@@ -470,31 +654,27 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
         if not chunks:
             raise Exception("No text could be extracted from PDF")
         
-        # Generate embeddings with load balancing
+        # Generate embeddings - PAKAI KEYS 1-3
         logger.info(f"Generating embeddings for {len(chunks)} chunks")
         chunk_texts = [chunk["content"] for chunk in chunks]
         embeddings = await generate_embeddings_batch(chunk_texts)
         
-        # Store in database with proper pgvector handling
+        # Store in database
         logger.info(f"Storing chunks and embeddings to database")
         async with db_pool.acquire() as conn:
-            # The connection already has register_vector from init_connection
-            
-            # Clear existing chunks for this UUID
+            # Clear existing chunks
             await conn.execute(
                 "DELETE FROM pdf_chunks WHERE book_uuid = $1",
                 book_uuid
             )
             
-            # Insert new chunks with pgvector support
+            # Insert new chunks
             for i, chunk in enumerate(chunks):
-                # Convert embedding to proper format for pgvector
                 embedding_array = embeddings[i]
                 
-                # Ensure we have the right dimensions (768 for text-embedding-004)
+                # Ensure 768 dimensions
                 if len(embedding_array) != 768:
                     logger.warning(f"Embedding dimension mismatch: got {len(embedding_array)}, expected 768")
-                    # Pad or truncate to 768 dimensions
                     if len(embedding_array) < 768:
                         embedding_array = embedding_array + [0.0] * (768 - len(embedding_array))
                     else:
@@ -509,7 +689,7 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
                     chunk["page_number"],
                     chunk["chunk_index"],
                     chunk["content"],
-                    embedding_array  # pgvector will handle the conversion with ::vector cast
+                    embedding_array
                 )
             
             # Update processing status
@@ -531,7 +711,6 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
     except Exception as e:
         logger.error(f"Error processing PDF {book_uuid}: {str(e)}")
         
-        # Update status to failed
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """
@@ -553,8 +732,8 @@ async def ask_question(request: ChatRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid UUID format")
     
-    # Check if PDF is processed
     async with db_pool.acquire() as conn:
+        # Check if PDF is processed
         status = await conn.fetchrow(
             "SELECT processing_status FROM pdf_processing_status WHERE book_uuid = $1",
             request.uuid
@@ -569,16 +748,9 @@ async def ask_question(request: ChatRequest):
                 detail=f"PDF processing status: {status['processing_status']}"
             )
         
-        # Generate query embedding with dedicated API keys (4-6)
+        # Generate query embedding - PAKAI KEYS 4-6
         try:
-            def _generate_query_embedding(question):
-                return genai.embed_content(
-                    model="models/text-embedding-004",
-                    content=question,
-                    task_type="retrieval_query"
-                )
-            
-            query_result = query_embedding_balancer.try_all_keys(_generate_query_embedding, request.question)
+            query_result = query_embedding_manager.generate_embedding(request.question, "retrieval_query")
             query_embedding = query_result["embedding"]
             
             # Ensure query embedding has correct dimensions
@@ -593,7 +765,7 @@ async def ask_question(request: ChatRequest):
             logger.error(f"Error generating query embedding: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to process question")
         
-        # Vector similarity search using L2 distance (matching the HNSW index)
+        # Vector similarity search
         similar_chunks = await conn.fetch(
             """
             SELECT id, page_number, chunk_index, content,
@@ -620,12 +792,13 @@ async def ask_question(request: ChatRequest):
             sources.append({
                 "page_number": chunk['page_number'],
                 "chunk_index": chunk['chunk_index'],
-                "relevance_score": round(1 - chunk['distance'], 2)  # Convert distance to similarity
+                "relevance_score": round(1 - chunk['distance'], 2)
             })
         
-        # Generate response with load balancing
+        # Generate response - PAKAI KEYS 7-9 dengan PRE-INITIALIZED MODELS
         try:
             prompt = build_prompt(request.question, merged_text, request.language)
+            # INI YANG DIOPTIMALKAN - pakai pre-initialized models dari keys 7-9
             response_text = generate_chat_response_with_balancer(prompt)
             
             processing_time = (datetime.now() - start_time).total_seconds()
@@ -681,13 +854,11 @@ async def delete_pdf(uuid: str):
         raise HTTPException(status_code=400, detail="Invalid UUID format")
     
     async with db_pool.acquire() as conn:
-        # Delete chunks
         chunks_deleted = await conn.execute(
             "DELETE FROM pdf_chunks WHERE book_uuid = $1",
             uuid
         )
         
-        # Delete processing status
         status_deleted = await conn.execute(
             "DELETE FROM pdf_processing_status WHERE book_uuid = $1",
             uuid
@@ -718,28 +889,47 @@ async def health_check():
     except:
         db_status = "unhealthy"
     
-    # Test Gemini API with one key from embedding batch balancer
+    # Test each specialized manager
     try:
-        def _test_gemini():
-            return genai.embed_content(
-                model="models/text-embedding-004",
-                content="test",
-                task_type="retrieval_query"
-            )
+        embedding_status = "healthy" if len(embedding_batch_manager.models) > 0 else "unhealthy"
+        query_status = "healthy" if len(query_embedding_manager.models) > 0 else "unhealthy" 
+        chat_status = "healthy" if len(chat_response_manager.models) > 0 else "unhealthy"
         
-        test_result = embedding_batch_balancer.try_all_keys(_test_gemini)
-        gemini_status = "healthy" if test_result else "unhealthy"
-    except:
-        gemini_status = "unhealthy"
+        # Optional: Test actual API calls
+        try:
+            test_embedding = embedding_batch_manager.generate_embedding("test", "retrieval_query")
+            embedding_status = "healthy" if test_embedding else "unhealthy"
+        except:
+            embedding_status = "unhealthy"
+            
+    except Exception as e:
+        logger.error(f"Health check error: {str(e)}")
+        embedding_status = query_status = chat_status = "unhealthy"
     
     return {
         "database": db_status,
-        "gemini_api": gemini_status,
-        "available_keys": len(ALL_GEMINI_KEYS),
-        "embedding_batch_keys": len(EMBEDDING_BATCH_KEYS),
-        "query_embedding_keys": len(QUERY_EMBEDDING_KEYS),
-        "chat_response_keys": len(CHAT_RESPONSE_KEYS),
-        "overall": "healthy" if db_status == "healthy" and gemini_status == "healthy" else "unhealthy"
+        "embedding_batch_manager": {
+            "status": embedding_status,
+            "working_models": len(embedding_batch_manager.models),
+            "keys_range": "1-3"
+        },
+        "query_embedding_manager": {
+            "status": query_status,
+            "working_models": len(query_embedding_manager.models),
+            "keys_range": "4-6"
+        },
+        "chat_response_manager": {
+            "status": chat_status,
+            "working_models": len(chat_response_manager.models),
+            "keys_range": "7-9"
+        },
+        "total_api_keys": len(ALL_GEMINI_KEYS),
+        "overall": "healthy" if all([
+            db_status == "healthy",
+            embedding_status == "healthy",
+            query_status == "healthy", 
+            chat_status == "healthy"
+        ]) else "unhealthy"
     }   
 
 if __name__ == "__main__":
