@@ -52,14 +52,6 @@ def fallback_sent_tokenize(text):
     sentences = re.split(r'[.!?]+', text)
     return [s.strip() for s in sentences if s.strip()]
 
-def fallback_word_tokenize(text):
-    """Fallback word tokenization using regex"""
-    if not text:
-        return []
-    # Extract words (alphanumeric characters)
-    words = re.findall(r'\b\w+\b', text.lower())
-    return words
-
 def safe_sent_tokenize(text):
     """Safe sentence tokenization with fallback"""
     try:
@@ -70,35 +62,6 @@ def safe_sent_tokenize(text):
     except Exception as e:
         logger.error(f"Sentence tokenization error: {str(e)}")
         return fallback_sent_tokenize(text)
-
-def safe_word_tokenize(text):
-    """Safe word tokenization with fallback"""
-    try:
-        return word_tokenize(text)
-    except (LookupError, OSError) as e:
-        logger.warning(f"NLTK word_tokenize failed, using fallback: {str(e)}")
-        return fallback_word_tokenize(text)
-    except Exception as e:
-        logger.error(f"Word tokenization error: {str(e)}")
-        return fallback_word_tokenize(text)
-
-def get_stopwords_safe(language='indonesian'):
-    """Get stopwords with fallback"""
-    try:
-        return set(stopwords.words(language) + stopwords.words('english'))
-    except (LookupError, OSError):
-        logger.warning("NLTK stopwords not available, using basic fallback")
-        # Basic Indonesian and English stopwords
-        basic_stopwords = {
-            'dan', 'atau', 'yang', 'di', 'ke', 'dari', 'untuk', 'dengan', 'pada', 'dalam',
-            'adalah', 'akan', 'dapat', 'ada', 'ini', 'itu', 'tersebut', 'saya', 'kamu',
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
-            'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had'
-        }
-        return basic_stopwords
-    except Exception as e:
-        logger.error(f"Error getting stopwords: {str(e)}")
-        return set()
 
 # Download NLTK resources at startup
 try:
@@ -134,15 +97,14 @@ CHAT_RESPONSE_KEYS = ALL_GEMINI_KEYS[6:9]    # Keys 7-9 for chat response genera
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
-MAX_CHUNKS_PER_REQUEST = int(os.getenv("MAX_CHUNKS_PER_REQUEST", "8"))
-MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "4000"))
+MAX_CHUNKS_PER_REQUEST = int(os.getenv("MAX_CHUNKS_PER_REQUEST", "5"))
 
 if not ALL_GEMINI_KEYS or len(ALL_GEMINI_KEYS) < 9:
     raise ValueError("9 GEMINI_API_KEYs are required (GEMINI_API_KEY_1 to GEMINI_API_KEY_9)")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL environment variable is required")
 
-# Enhanced Model Manager
+# Enhanced Model Manager (KEEP AS IS)
 class SpecializedModelManager:
     def __init__(self, api_keys: List[str], function_name: str, need_chat_model: bool = False):
         if not api_keys:
@@ -252,7 +214,7 @@ class SpecializedModelManager:
         logger.error(f"{self.function_name}: All API keys failed, returning fallback")
         return "Maaf, saya sedang mengalami kendala teknis. Silakan coba lagi dalam beberapa menit."
 
-# Initialize specialized managers
+# Initialize specialized managers (KEEP AS IS)
 embedding_batch_manager = SpecializedModelManager(
     EMBEDDING_BATCH_KEYS, "EmbeddingBatch", need_chat_model=False
 )
@@ -289,9 +251,9 @@ async def lifespan(app: FastAPI):
     await db_pool.close()
 
 app = FastAPI(
-    title="Enhanced Chat with PDF RAG API",
-    description="Optimized backend dengan chunking strategy yang lebih baik",
-    version="2.0.0",
+    title="Simple Chat with PDF RAG API",
+    description="Back to basics: Simple vector search + Gemini response",
+    version="2.1.0",
     lifespan=lifespan
 )
 
@@ -324,7 +286,7 @@ class ProcessingStatus(BaseModel):
     processed_at: Optional[datetime] = None
     error_message: Optional[str] = None
 
-# Enhanced utility functions
+# Utility functions
 def count_tokens(text: str) -> int:
     """Count tokens using tiktoken"""
     try:
@@ -386,7 +348,7 @@ def enhance_image_for_ocr(image):
     return image
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> Dict[int, str]:
-    """Enhanced text extraction with better OCR handling"""
+    """Extract text from PDF with OCR fallback"""
     page_texts = {}
     
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -394,20 +356,9 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> Dict[int, str]:
     for page_num in range(len(doc)):
         page = doc[page_num]
         
-        # Try multiple extraction methods
-        text_methods = [
-            page.get_text("text"),
-            page.get_text("blocks"),
-            page.get_text("dict")
-        ]
-        
-        text = ""
-        for method_text in text_methods:
-            if isinstance(method_text, str):
-                cleaned = clean_extracted_text(method_text)
-                if cleaned and len(cleaned) > 100:  # Higher threshold
-                    text = cleaned
-                    break
+        # Try text extraction first
+        text = page.get_text("text")
+        text = clean_extracted_text(text)
         
         # If no good text found, use OCR
         if not text or len(text) < 100:
@@ -452,7 +403,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> Dict[int, str]:
     return page_texts
 
 def create_semantic_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
-    """Enhanced chunking with semantic boundaries and overlap"""
+    """Create chunks with sentence boundaries"""
     chunks = []
     
     for page_num, text in page_texts.items():
@@ -460,11 +411,10 @@ def create_semantic_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
             continue
         
         try:
-            # Split by sentences for better semantic boundaries using safe tokenizer
+            # Split by sentences
             sentences = safe_sent_tokenize(text)
         except Exception as e:
             logger.warning(f"Sentence tokenization failed: {str(e)}, using fallback")
-            # Fallback to simple splitting
             sentences = text.split('. ')
         
         current_chunk = []
@@ -525,66 +475,49 @@ def create_semantic_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
     logger.info(f"Created {len(chunks)} semantic chunks from {len(page_texts)} pages")
     return chunks
 
-def build_enhanced_prompt(user_prompt: str, context_chunks: List[Dict], language: str) -> str:
-    """Build enhanced prompt with structured context"""
+# SIMPLIFIED FUNCTIONS - BACK TO BASICS
+
+def build_simple_prompt(user_prompt: str, context_chunks: List[Dict], language: str) -> str:
+    """Build simple and effective prompt"""
     
-    # Structure context with clear source information
+    # Structure context
     context_parts = []
     for i, chunk in enumerate(context_chunks):
-        relevance = chunk.get('similarity_score', chunk.get('relevance_score', 0.0))
         context_parts.append(f"""
-[Sumber {i+1}: Halaman {chunk['page_number']}, Bagian {chunk['chunk_index']}]
+[Informasi dari halaman {chunk['page_number']}]:
 {chunk['content']}
-Relevansi: {relevance:.2f}
 """)
     
     context_text = "\n".join(context_parts)
     
     if language == "id":
         return f"""
-Anda adalah Rima, asisten AI yang membantu menjawab pertanyaan berdasarkan dokumen PDF.
+Berdasarkan informasi dari dokumen berikut:
 
-**KONTEKS DOKUMEN:**
 {context_text}
 
-**PETUNJUK PENTING:**
-1. Jawab HANYA berdasarkan informasi dari konteks dokumen di atas
-2. Jika informasi tidak cukup untuk menjawab lengkap, katakan "Berdasarkan dokumen yang tersedia, informasi tidak lengkap untuk menjawab pertanyaan ini secara menyeluruh"
-3. Jika pertanyaan sama sekali di luar konteks dokumen, jelaskan dengan sopan bahwa pertanyaan tidak berkaitan dengan isi dokumen
-4. Berikan jawaban yang akurat, faktual, dan mudah dipahami
-5. Sertakan referensi halaman jika memungkinkan (contoh: "menurut halaman 5...")
-6. Gunakan bahasa yang ramah dan alami
-7. Jika ada informasi yang bertentangan dalam dokumen, sampaikan kedua perspektif
+Jawab pertanyaan ini dengan singkat dan jelas hanya menggunakan informasi dari dokumen di atas:
+{user_prompt}
 
-**PERTANYAAN USER:** {user_prompt}
-
-**JAWABAN:**
+Jika informasi tidak cukup, jawab dengan jujur bahwa informasi tidak ditemukan dalam dokumen.
+Jawaban:
 """
     else:
         return f"""
-You are Rima, an AI assistant that helps answer questions based on PDF documents.
+Based on the following document information:
 
-**DOCUMENT CONTEXT:**
 {context_text}
 
-**IMPORTANT INSTRUCTIONS:**
-1. Answer ONLY based on the context above
-2. If information is insufficient for a complete answer, say "Based on the available document, the information is incomplete to fully answer this question"
-3. If the question is completely outside the document context, politely explain that the question is not related to the document content
-4. Provide accurate, factual, and easy-to-understand answers
-5. Include page references when possible (e.g., "according to page 5...")
-6. Use friendly and natural language
-7. If there's conflicting information in the document, present both perspectives
+Answer this question briefly and clearly using only the information from the above document:
+{user_prompt}
 
-**USER QUESTION:** {user_prompt}
-
-**ANSWER:**
+If information is insufficient, honestly state that the information is not found in the document.
+Answer:
 """
 
-async def retrieve_and_rerank_chunks(book_uuid: str, query_embedding: List[float], question: str, top_k: int = 10) -> List[Dict]:
-    """Enhanced retrieval with reranking based on semantic and keyword similarity"""
+async def retrieve_similar_chunks(book_uuid: str, query_embedding: List[float], top_k: int = 5) -> List[Dict]:
+    """Simple retrieval based on vector similarity only"""
     async with db_pool.acquire() as conn:
-        # First pass: get more chunks for reranking
         chunks = await conn.fetch(
             """
             SELECT id, page_number, chunk_index, content,
@@ -594,113 +527,16 @@ async def retrieve_and_rerank_chunks(book_uuid: str, query_embedding: List[float
             ORDER BY embedding <-> $2::vector
             LIMIT $3
             """,
-            book_uuid, query_embedding, min(top_k * 2, 20)
+            book_uuid, query_embedding, top_k
         )
         
-        if not chunks:
-            return []
-        
-        # Enhanced reranking
-        reranked_chunks = []
-        query_keywords = set(question.lower().split())
-        
-        # Remove common stopwords from query keywords using safe function
-        try:
-            stop_words = get_stopwords_safe()
-            query_keywords = {word for word in query_keywords if word not in stop_words and len(word) > 2}
-        except Exception as e:
-            logger.warning(f"Error processing stopwords: {str(e)}")
-            query_keywords = {word for word in query_keywords if len(word) > 2}
-        
-        for chunk in chunks:
-            chunk_text = chunk['content'].lower()
-            
-            # Calculate keyword overlap score using safe tokenizer
-            try:
-                chunk_words = set(safe_word_tokenize(chunk_text))
-            except Exception as e:
-                logger.warning(f"Word tokenization failed: {str(e)}")
-                chunk_words = set(chunk_text.split())
-            
-            keyword_matches = len(query_keywords.intersection(chunk_words))
-            keyword_score = keyword_matches / max(len(query_keywords), 1) if query_keywords else 0
-            
-            # Calculate semantic similarity score
-            semantic_score = 1 - chunk['distance']
-            
-            # Calculate chunk quality score (longer chunks might be more informative)
-            length_score = min(len(chunk['content']) / 1000, 1.0)
-            
-            # Combined score with weights
-            combined_score = (
-                semantic_score * 0.6 + 
-                keyword_score * 0.3 + 
-                length_score * 0.1
-            )
-            
-            reranked_chunks.append({
-                **dict(chunk),
-                'similarity_score': combined_score,
-                'semantic_score': semantic_score,
-                'keyword_score': keyword_score
-            })
-        
-        # Sort by combined score and return top k
-        reranked_chunks.sort(key=lambda x: x['similarity_score'], reverse=True)
-        return reranked_chunks[:top_k]
+        return [dict(chunk) for chunk in chunks]
 
-def manage_context_window(chunks: List[Dict], max_tokens: int = MAX_CONTEXT_TOKENS) -> List[Dict]:
-    """Ensure context doesn't exceed token limit"""
-    selected_chunks = []
-    total_tokens = 0
-    
-    for chunk in sorted(chunks, key=lambda x: x.get('similarity_score', 0), reverse=True):
-        chunk_tokens = chunk.get('token_count', count_tokens(chunk['content']))
-        
-        # Add some buffer for prompt and response
-        if total_tokens + chunk_tokens <= max_tokens - 1000:
-            selected_chunks.append(chunk)
-            total_tokens += chunk_tokens
-        else:
-            break
-    
-    logger.info(f"Selected {len(selected_chunks)} chunks with {total_tokens} total tokens")
-    return selected_chunks
-
-def verify_answer_quality(answer: str, context_chunks: List[Dict], question: str) -> bool:
-    """Verify if answer meets quality standards"""
-    answer_lower = answer.lower()
-    
-    # Check for uncertainty phrases (these are acceptable)
-    uncertainty_phrases = [
-        "tidak tahu", "tidak yakin", "tidak dapat", "tidak bisa",
-        "informasi tidak", "berdasarkan dokumen", "i don't know", 
-        "i'm not sure", "based on the document", "information is incomplete"
-    ]
-    
-    if any(phrase in answer_lower for phrase in uncertainty_phrases):
-        return True
-    
-    # Check minimum answer length
-    if len(answer.strip()) < 20:
-        return False
-    
-    # Check if answer seems to be making things up
-    suspicious_phrases = [
-        "menurut saya", "sepertinya", "mungkin", "kemungkinan",
-        "in my opinion", "i think", "probably", "likely"
-    ]
-    
-    if any(phrase in answer_lower for phrase in suspicious_phrases):
-        return False
-    
-    return True
-
-# Enhanced API functions
+# Enhanced API functions (keep existing ones that work)
 async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """Generate embeddings using optimized batch processing"""
     embeddings = []
-    batch_size = 50  # Smaller batch for better reliability
+    batch_size = 50
     
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
@@ -727,7 +563,7 @@ def generate_chat_response_with_balancer(prompt: str) -> str:
     """Generate chat response using optimized model balancer"""
     return chat_response_manager.generate_chat_response(prompt)
 
-# API Endpoints (same structure, enhanced implementations)
+# API Endpoints
 
 @app.post("/upload_pdf")
 async def upload_pdf(
@@ -735,7 +571,7 @@ async def upload_pdf(
     uuid: str = Form(...),
     file: UploadFile = File(...)
 ):
-    """Upload and process PDF with enhanced text extraction and chunking"""
+    """Upload and process PDF"""
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="File must be a PDF")
     
@@ -758,12 +594,12 @@ async def upload_pdf(
     
     return {
         "status": "accepted",
-        "message": "PDF processing started with enhanced extraction and chunking",
+        "message": "PDF processing started",
         "book_uuid": uuid
     }
 
 async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes):
-    """Enhanced background PDF processing"""
+    """Background PDF processing"""
     start_time = datetime.now()
     
     try:
@@ -778,12 +614,12 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
                 book_uuid, filename
             )
         
-        # Enhanced text extraction
-        logger.info(f"Starting enhanced text extraction for {book_uuid}")
+        # Text extraction
+        logger.info(f"Starting text extraction for {book_uuid}")
         page_texts = extract_text_from_pdf(pdf_bytes)
         
-        # Enhanced semantic chunking
-        logger.info(f"Creating semantic chunks for {book_uuid}")
+        # Chunking
+        logger.info(f"Creating chunks for {book_uuid}")
         chunks = create_semantic_chunks(page_texts)
         
         if not chunks:
@@ -795,7 +631,7 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
         embeddings = await generate_embeddings_batch(chunk_texts)
         
         # Store in database
-        logger.info(f"Storing enhanced chunks and embeddings to database")
+        logger.info(f"Storing chunks and embeddings to database")
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM pdf_chunks WHERE book_uuid = $1", book_uuid)
             
@@ -831,7 +667,7 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
                 book_uuid, len(page_texts), len(chunks)
             )
         
-        logger.info(f"Successfully processed PDF {book_uuid} with enhanced pipeline in {processing_time:.2f}s")
+        logger.info(f"Successfully processed PDF {book_uuid} in {processing_time:.2f}s")
         
     except Exception as e:
         logger.error(f"Error processing PDF {book_uuid}: {str(e)}")
@@ -846,9 +682,10 @@ async def process_pdf_background(book_uuid: str, filename: str, pdf_bytes: bytes
                 book_uuid, str(e)
             )
 
+# SIMPLIFIED ASK ENDPOINT - BACK TO BASICS
 @app.post("/ask", response_model=ChatResponse)
 async def ask_question(request: ChatRequest):
-    """Enhanced question answering with better retrieval and response generation"""
+    """Simple and effective question answering - Back to basics RAG"""
     start_time = datetime.now()
     
     try:
@@ -872,57 +709,53 @@ async def ask_question(request: ChatRequest):
                 detail=f"PDF processing status: {status['processing_status']}"
             )
         
-        # Generate query embedding with enhanced approach
+        # Generate query embedding
         try:
             query_result = query_embedding_manager.generate_embedding_optimized(request.question, "retrieval_query")
             query_embedding = query_result["embedding"]
             
-            # Ensure query embedding has correct dimensions
+            # Ensure correct dimensions
             if len(query_embedding) != 768:
-                logger.warning(f"Query embedding dimension mismatch: got {len(query_embedding)}, expected 768")
                 if len(query_embedding) < 768:
                     query_embedding = query_embedding + [0.0] * (768 - len(query_embedding))
                 else:
                     query_embedding = query_embedding[:768]
             
         except Exception as e:
-            logger.error(f"Error generating enhanced query embedding: {str(e)}")
+            logger.error(f"Error generating query embedding: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to process question")
         
-        # Enhanced retrieval with reranking
-        similar_chunks = await retrieve_and_rerank_chunks(
-            request.uuid, query_embedding, request.question, MAX_CHUNKS_PER_REQUEST
+        # Simple vector similarity search
+        similar_chunks = await retrieve_similar_chunks(
+            request.uuid, query_embedding, MAX_CHUNKS_PER_REQUEST
         )
         
         if not similar_chunks:
-            raise HTTPException(status_code=404, detail="No relevant content found")
-        
-        # Manage context window
-        optimized_chunks = manage_context_window(similar_chunks, MAX_CONTEXT_TOKENS)
+            if request.language == "id":
+                answer = "Maaf, tidak ditemukan informasi yang relevan dengan pertanyaan Anda dalam dokumen."
+            else:
+                answer = "Sorry, no relevant information was found for your question in the document."
+            
+            return ChatResponse(
+                status="success",
+                answer=answer,
+                sources=[],
+                response_time=f"{(datetime.now() - start_time).total_seconds():.2f}s"
+            )
         
         # Build sources information
         sources = []
-        for chunk in optimized_chunks:
+        for chunk in similar_chunks:
             sources.append({
                 "page_number": chunk['page_number'],
                 "chunk_index": chunk['chunk_index'],
-                "relevance_score": round(chunk['similarity_score'], 3),
-                "semantic_score": round(chunk.get('semantic_score', 0), 3),
-                "keyword_score": round(chunk.get('keyword_score', 0), 3)
+                "similarity_score": round(1 - chunk['distance'], 3)
             })
         
-        # Generate enhanced response
+        # Generate simple response
         try:
-            prompt = build_enhanced_prompt(request.question, optimized_chunks, request.language)
+            prompt = build_simple_prompt(request.question, similar_chunks, request.language)
             response_text = generate_chat_response_with_balancer(prompt)
-            
-            # Verify answer quality
-            if not verify_answer_quality(response_text, optimized_chunks, request.question):
-                logger.warning(f"Answer quality check failed for question: {request.question}")
-                if request.language == "id":
-                    response_text = "Maaf, berdasarkan dokumen yang tersedia, saya tidak dapat memberikan jawaban yang cukup akurat untuk pertanyaan ini. Silakan coba pertanyaan yang lebih spesifik atau periksa kembali apakah informasi yang dicari memang ada dalam dokumen."
-                else:
-                    response_text = "Sorry, based on the available document, I cannot provide a sufficiently accurate answer to this question. Please try a more specific question or check if the information you're looking for is actually in the document."
             
             processing_time = (datetime.now() - start_time).total_seconds()
             
@@ -934,8 +767,20 @@ async def ask_question(request: ChatRequest):
             )
             
         except Exception as e:
-            logger.error(f"Error generating enhanced response: {str(e)}")
-            raise HTTPException(status_code=500, detail="Failed to generate answer")
+            logger.error(f"Error generating response: {str(e)}")
+            
+            # Fallback response
+            if request.language == "id":
+                fallback_answer = f"Berdasarkan dokumen, informasi yang ditemukan: {similar_chunks[0]['content'][:200]}..."
+            else:
+                fallback_answer = f"Based on the document, found information: {similar_chunks[0]['content'][:200]}..."
+            
+            return ChatResponse(
+                status="success",
+                answer=fallback_answer,
+                sources=sources,
+                response_time=f"{(datetime.now() - start_time).total_seconds():.2f}s"
+            )
 
 @app.get("/status/{uuid}", response_model=ProcessingStatus)
 async def get_processing_status(uuid: str):
@@ -997,22 +842,22 @@ async def delete_pdf(uuid: str):
 async def root():
     """Health check endpoint"""
     return {
-        "message": "Enhanced Chat with PDF RAG API - Optimized with Semantic Chunking",
-        "version": "2.0.0",
+        "message": "Simple Chat with PDF RAG API - Back to Basics",
+        "version": "2.1.0",
         "status": "healthy",
+        "approach": "Simple vector similarity + Gemini response generation",
         "features": [
-            "Enhanced text extraction with OCR optimization",
-            "Semantic chunking with sentence boundaries", 
-            "Improved retrieval with reranking",
-            "Context window management",
-            "Answer quality verification",
+            "Basic text extraction with OCR fallback",
+            "Sentence-based chunking", 
+            "Simple pgvector similarity search",
+            "Direct Gemini response generation",
             "Pre-initialized model optimization"
         ]
     }
 
 @app.get("/health")
 async def health_check():
-    """Comprehensive health check with enhanced model status"""
+    """Health check with basic model status"""
     try:
         async with db_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -1020,33 +865,33 @@ async def health_check():
     except:
         db_status = "unhealthy"
     
-    # Test each specialized manager
+    # Test specialized managers
     try:
         embedding_status = "healthy" if len(embedding_batch_manager.models) > 0 else "unhealthy"
         query_status = "healthy" if len(query_embedding_manager.models) > 0 else "unhealthy" 
         chat_status = "healthy" if len(chat_response_manager.models) > 0 else "unhealthy"
         
-        # Test actual API calls
+        # Simple API tests
         try:
-            test_embedding = embedding_batch_manager.generate_embedding_optimized("health test", "retrieval_query")
+            test_embedding = embedding_batch_manager.generate_embedding_optimized("test", "retrieval_query")
             embedding_status = "healthy" if test_embedding else "unhealthy"
         except:
             embedding_status = "unhealthy"
         
         try:
-            test_query = query_embedding_manager.generate_embedding_optimized("health test query", "retrieval_query")
+            test_query = query_embedding_manager.generate_embedding_optimized("test query", "retrieval_query")
             query_status = "healthy" if test_query else "unhealthy"
         except:
             query_status = "unhealthy"
             
         try:
-            test_chat = chat_response_manager.generate_chat_response("Test: Respond with 'OK'")
+            test_chat = chat_response_manager.generate_chat_response("Test: Say OK")
             chat_status = "healthy" if test_chat else "unhealthy"
         except:
             chat_status = "unhealthy"
             
     except Exception as e:
-        logger.error(f"Enhanced health check error: {str(e)}")
+        logger.error(f"Health check error: {str(e)}")
         embedding_status = query_status = chat_status = "unhealthy"
     
     return {
@@ -1054,36 +899,20 @@ async def health_check():
         "embedding_batch_manager": {
             "status": embedding_status,
             "working_models": len(embedding_batch_manager.models),
-            "keys_range": "1-3",
-            "optimization": "pre-initialized embedding models + enhanced batching"
+            "keys_range": "1-3"
         },
         "query_embedding_manager": {
             "status": query_status,
             "working_models": len(query_embedding_manager.models),
-            "keys_range": "4-6",
-            "optimization": "pre-initialized embedding models + query optimization"
+            "keys_range": "4-6"
         },
         "chat_response_manager": {
             "status": chat_status,
             "working_models": len(chat_response_manager.models),
-            "keys_range": "7-9",
-            "optimization": "pre-initialized chat models + enhanced prompts"
+            "keys_range": "7-9"
         },
         "total_api_keys": len(ALL_GEMINI_KEYS),
-        "enhancements": [
-            "Semantic chunking with sentence boundaries",
-            "Enhanced OCR with image preprocessing", 
-            "Retrieval reranking with keyword + semantic scores",
-            "Context window management",
-            "Answer quality verification",
-            "Improved error handling and fallbacks"
-        ],
-        "performance_optimizations": [
-            "Pre-initialized models reduce API overhead",
-            "Batch processing for embeddings",
-            "Optimized chunk overlap strategy",
-            "Smart context window management"
-        ],
+        "approach": "Simple RAG: Vector search → Gemini response",
         "overall": "healthy" if all([
             db_status == "healthy",
             embedding_status == "healthy",
@@ -1094,7 +923,7 @@ async def health_check():
 
 @app.get("/stats/{uuid}")
 async def get_pdf_stats(uuid: str):
-    """Get detailed statistics for a processed PDF"""
+    """Get basic statistics for a processed PDF"""
     try:
         uuid_lib.UUID(uuid)
     except ValueError:
@@ -1145,9 +974,10 @@ async def get_pdf_stats(uuid: str):
             "processing_status": dict(status),
             "chunk_statistics": dict(chunk_stats) if chunk_stats else None,
             "page_distribution": [dict(row) for row in page_distribution],
-            "chunking_strategy": "semantic_with_sentence_boundaries",
+            "chunking_strategy": "sentence_based",
             "chunk_size_limit": CHUNK_SIZE,
-            "chunk_overlap": CHUNK_OVERLAP
+            "chunk_overlap": CHUNK_OVERLAP,
+            "max_chunks_per_query": MAX_CHUNKS_PER_REQUEST
         }
 
 if __name__ == "__main__":
