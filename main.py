@@ -477,36 +477,6 @@ def create_semantic_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
 
 # SIMPLIFIED FUNCTIONS - BACK TO BASICS
 
-def clean_response_text(text: str) -> str:
-    """Clean and format response text for better readability"""
-    if not text:
-        return text
-    
-    # Remove excessive markdown formatting
-    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Remove bold **text**
-    text = re.sub(r'\*([^*]+)\*', r'\1', text)      # Remove italic *text*
-    text = re.sub(r'#{1,6}\s*([^\n]+)', r'\1', text)  # Remove headers
-    
-    # Clean up line breaks and spacing
-    text = re.sub(r'\n{3,}', '\n\n', text)  # Max 2 consecutive line breaks
-    text = re.sub(r'[ \t]+', ' ', text)     # Multiple spaces to single space
-    
-    # Fix numbered lists - make them more natural
-    text = re.sub(r'(\d+)\.\s*\*([^*\n]+)\*:', r'\1. \2:', text)
-    text = re.sub(r'(\d+)\.\s*\*([^*\n]+)\*', r'\1. \2', text)
-    
-    # Remove bullet points and replace with natural flow
-    text = re.sub(r'^\s*[-*•]\s*', '', text, flags=re.MULTILINE)
-    
-    # Clean up any remaining formatting artifacts
-    text = re.sub(r'`([^`]+)`', r'\1', text)  # Remove code formatting
-    text = text.replace('\\n', '\n')  # Fix escaped newlines
-    
-    # Final cleanup
-    text = text.strip()
-    
-    return text
-
 def build_simple_prompt(user_prompt: str, context_chunks: List[Dict], language: str) -> str:
     """Build simple and effective prompt"""
     
@@ -526,13 +496,15 @@ Berdasarkan informasi dari dokumen berikut:
 
 {context_text}
 
-Jawab pertanyaan ini dengan bahasa yang natural dan mudah dipahami. Jangan gunakan format markdown, bullet points, atau formatting khusus. Berikan jawaban yang mengalir seperti penjelasan biasa:
+Jawab pertanyaan ini dengan bahasa Indonesia yang natural dan mudah dipahami. 
 
-{user_prompt}
+PENTING: Jangan gunakan simbol formatting apapun seperti ** (bintang), * (asterisk), # (hashtag), atau \n. Berikan jawaban dalam bentuk teks biasa yang mengalir seperti percakapan normal. Jangan pakai bullet points, numbering dengan simbol, atau formatting markdown.
+
+Pertanyaan: {user_prompt}
 
 Jika informasi tidak cukup, jawab dengan jujur bahwa informasi tidak ditemukan dalam dokumen.
 
-Jawaban:
+Jawaban dalam teks biasa tanpa formatting:
 """
     else:
         return f"""
@@ -540,13 +512,15 @@ Based on the following document information:
 
 {context_text}
 
-Answer this question in natural, easy-to-understand language. Don't use markdown formatting, bullet points, or special formatting. Provide a flowing explanation like a normal conversation:
+Answer this question in natural, easy-to-understand English.
 
-{user_prompt}
+IMPORTANT: Don't use any formatting symbols like ** (asterisks), * (stars), # (hashtags), or \n. Provide the answer as plain text that flows like normal conversation. No bullet points, numbered lists with symbols, or markdown formatting.
+
+Question: {user_prompt}
 
 If information is insufficient, honestly state that the information is not found in the document.
 
-Answer:
+Answer in plain text without any formatting:
 """
 
 async def retrieve_similar_chunks(book_uuid: str, query_embedding: List[float], top_k: int = 5) -> List[Dict]:
