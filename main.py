@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import tiktoken
 
-# Enhanced text processing imports
+# Enhanced text processing imports with safe fallbacks
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords
@@ -32,12 +32,79 @@ from nltk.corpus import stopwords
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Download required NLTK data
+# Safe NLTK resource download with fallback functions
+def download_nltk_resources():
+    """Download required NLTK resources with proper error handling"""
+    resources = ['punkt', 'punkt_tab', 'stopwords']
+    
+    for resource in resources:
+        try:
+            nltk.download(resource, quiet=True)
+            logger.info(f"✓ Successfully downloaded NLTK resource: {resource}")
+        except Exception as e:
+            logger.warning(f"⚠ Failed to download NLTK resource {resource}: {str(e)}")
+
+def fallback_sent_tokenize(text):
+    """Fallback sentence tokenization using regex patterns"""
+    if not text:
+        return []
+    # Split on sentence-ending punctuation
+    sentences = re.split(r'[.!?]+', text)
+    return [s.strip() for s in sentences if s.strip()]
+
+def fallback_word_tokenize(text):
+    """Fallback word tokenization using regex"""
+    if not text:
+        return []
+    # Extract words (alphanumeric characters)
+    words = re.findall(r'\b\w+\b', text.lower())
+    return words
+
+def safe_sent_tokenize(text):
+    """Safe sentence tokenization with fallback"""
+    try:
+        return sent_tokenize(text)
+    except (LookupError, OSError) as e:
+        logger.warning(f"NLTK sent_tokenize failed, using fallback: {str(e)}")
+        return fallback_sent_tokenize(text)
+    except Exception as e:
+        logger.error(f"Sentence tokenization error: {str(e)}")
+        return fallback_sent_tokenize(text)
+
+def safe_word_tokenize(text):
+    """Safe word tokenization with fallback"""
+    try:
+        return word_tokenize(text)
+    except (LookupError, OSError) as e:
+        logger.warning(f"NLTK word_tokenize failed, using fallback: {str(e)}")
+        return fallback_word_tokenize(text)
+    except Exception as e:
+        logger.error(f"Word tokenization error: {str(e)}")
+        return fallback_word_tokenize(text)
+
+def get_stopwords_safe(language='indonesian'):
+    """Get stopwords with fallback"""
+    try:
+        return set(stopwords.words(language) + stopwords.words('english'))
+    except (LookupError, OSError):
+        logger.warning("NLTK stopwords not available, using basic fallback")
+        # Basic Indonesian and English stopwords
+        basic_stopwords = {
+            'dan', 'atau', 'yang', 'di', 'ke', 'dari', 'untuk', 'dengan', 'pada', 'dalam',
+            'adalah', 'akan', 'dapat', 'ada', 'ini', 'itu', 'tersebut', 'saya', 'kamu',
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
+            'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had'
+        }
+        return basic_stopwords
+    except Exception as e:
+        logger.error(f"Error getting stopwords: {str(e)}")
+        return set()
+
+# Download NLTK resources at startup
 try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-except:
-    pass
+    download_nltk_resources()
+except Exception as e:
+    logger.warning(f"NLTK resource download failed: {str(e)}")
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -393,9 +460,10 @@ def create_semantic_chunks(page_texts: Dict[int, str]) -> List[Dict[str, Any]]:
             continue
         
         try:
-            # Split by sentences for better semantic boundaries
-            sentences = sent_tokenize(text)
-        except:
+            # Split by sentences for better semantic boundaries using safe tokenizer
+            sentences = safe_sent_tokenize(text)
+        except Exception as e:
+            logger.warning(f"Sentence tokenization failed: {str(e)}, using fallback")
             # Fallback to simple splitting
             sentences = text.split('. ')
         
@@ -536,18 +604,24 @@ async def retrieve_and_rerank_chunks(book_uuid: str, query_embedding: List[float
         reranked_chunks = []
         query_keywords = set(question.lower().split())
         
-        # Remove common stopwords from query keywords
+        # Remove common stopwords from query keywords using safe function
         try:
-            stop_words = set(stopwords.words('indonesian') + stopwords.words('english'))
+            stop_words = get_stopwords_safe()
             query_keywords = {word for word in query_keywords if word not in stop_words and len(word) > 2}
-        except:
+        except Exception as e:
+            logger.warning(f"Error processing stopwords: {str(e)}")
             query_keywords = {word for word in query_keywords if len(word) > 2}
         
         for chunk in chunks:
             chunk_text = chunk['content'].lower()
             
-            # Calculate keyword overlap score
-            chunk_words = set(word_tokenize(chunk_text))
+            # Calculate keyword overlap score using safe tokenizer
+            try:
+                chunk_words = set(safe_word_tokenize(chunk_text))
+            except Exception as e:
+                logger.warning(f"Word tokenization failed: {str(e)}")
+                chunk_words = set(chunk_text.split())
+            
             keyword_matches = len(query_keywords.intersection(chunk_words))
             keyword_score = keyword_matches / max(len(query_keywords), 1) if query_keywords else 0
             
