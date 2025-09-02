@@ -498,13 +498,13 @@ Berdasarkan informasi dari dokumen berikut:
 
 Jawab pertanyaan ini dengan bahasa Indonesia yang natural dan mudah dipahami. 
 
-PENTING: Jangan gunakan simbol formatting apapun seperti ** (bintang), * (asterisk), # (hashtag), atau \n. Berikan jawaban dalam bentuk teks biasa yang mengalir seperti percakapan normal. Jangan pakai bullet points, numbering dengan simbol, atau formatting markdown.
+PENTING: Berikan jawaban dalam SATU PARAGRAF yang mengalir tanpa line break sama sekali. Jangan gunakan simbol formatting apapun seperti ** (bintang), * (asterisk), # (hashtag), \\n (newline), atau enter. Tulis seperti sedang berbicara langsung dalam satu kalimat panjang yang berkesinambungan.
 
 Pertanyaan: {user_prompt}
 
 Jika informasi tidak cukup, jawab dengan jujur bahwa informasi tidak ditemukan dalam dokumen.
 
-Jawaban dalam teks biasa tanpa formatting:
+Jawaban dalam satu paragraf tanpa line break:
 """
     else:
         return f"""
@@ -514,13 +514,13 @@ Based on the following document information:
 
 Answer this question in natural, easy-to-understand English.
 
-IMPORTANT: Don't use any formatting symbols like ** (asterisks), * (stars), # (hashtags), or \n. Provide the answer as plain text that flows like normal conversation. No bullet points, numbered lists with symbols, or markdown formatting.
+IMPORTANT: Provide the answer in ONE FLOWING PARAGRAPH without any line breaks at all. Don't use any formatting symbols like ** (asterisks), * (stars), # (hashtags), \\n (newlines), or enter. Write as if you're speaking directly in one continuous sentence.
 
 Question: {user_prompt}
 
 If information is insufficient, honestly state that the information is not found in the document.
 
-Answer in plain text without any formatting:
+Answer in one paragraph without line breaks:
 """
 
 async def retrieve_similar_chunks(book_uuid: str, query_embedding: List[float], top_k: int = 5) -> List[Dict]:
